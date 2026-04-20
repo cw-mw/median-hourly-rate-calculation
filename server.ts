@@ -1,9 +1,11 @@
+import 'dotenv/config';
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import multer from 'multer';
 import { GoogleGenAI } from '@google/genai';
 import path from 'path';
-import pdfParse from 'pdf-parse';
+// @ts-ignore - Bypass index.js which incorrectly triggers local testing tests on ESM platforms
+import pdfParse from 'pdf-parse/lib/pdf-parse.js';
 
 const upload = multer({ storage: multer.memoryStorage() });
 
@@ -76,7 +78,6 @@ async function startServer() {
       }
 
       // STEP 2: Confidence Threshold Check
-      // If our free local parser found items with good confidence, skip the API call to save costs.
       const CONFIDENCE_THRESHOLD = 60;
       if (confidence >= CONFIDENCE_THRESHOLD && localItems.length > 0) {
         console.log(`[Parse] High confidence (${confidence}%) local extraction successful. Saving API costs.`);
@@ -84,14 +85,13 @@ async function startServer() {
       }
 
       // STEP 3: Fallback to Gemini Multimodal
-      // (Used if PDF is a scanned image, OCR failed, or layout is too complex for basic regex)
+      // (Used if PDF is a scanned image, OCR failed, or layout is complex)
       console.log(`[Parse] Confidence low (${confidence}%). Falling back to Gemini API...`);
 
-      if (!process.env.GEMINI_API_KEY) {
-        throw new Error('GEMINI_API_KEY is missing');
-      }
-
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      // We load the explicit user key here. If they didn't provide one, it falls back to the proxy token (or nothing).
+      const explicitKey = process.env.CUSTOM_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
+      
+      const ai = new GoogleGenAI(explicitKey ? { apiKey: explicitKey } : {});
       const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
         contents: [
@@ -105,20 +105,13 @@ async function startServer() {
                 }
               },
               {
-                text: `Extract the line items from this estimate PDF. For each line item, extract the Description, Hourly Rate (in Euro), and Hours.
-Be smart about it. If it's a flat fee without hourly rate, just specify rate as the total and hours as 1. Wait, actually, German estimates might have 'Anzahl', 'Preis', 'Summe'.
-For example: 'Konzeption und Planung', Anzahl: 1, Preis: 3.500,00 €. Make rate '3500.00', hours '1'.
-For 'Produktion und Dreh' Videograf: 20h. If rate is flat 26.600,00 but you see 20h, just output rate '1330' and hours '20', or rate '26600' and hours '1'. Preferably whatever adds up to the Sum.
-For 'Social Media Manager: 20h' inside a bigger block, aggregate the total hours or put them as separate line items. 
-If the file contains multiple items like:
-- Konzeption und Planung: 3500 Euro (1)
-- Produktion und Dreh: 26600 Euro (1)
-- Post Production: 7280 Euro (1)
-- Creator / Influencer: 20000 Euro (1)
-
-Return the result STRICTLY as a JSON array where each object has "name" (string), "rate" (string representing number), and "hours" (string representing number). 
+                text: `Extract the line items from this estimate PDF. The structure usually follows: "Produkte & Services | Anzahl | Preis | Summe".
+For each line item, extract the Description, Hourly Rate/Unit Price (in Euro), and Hours/Quantity (Anzahl).
+If it's a flat fee without an hourly rate or unit price, specify the total amount as the rate and "1" as the hours. 
+Generally, 'Preis' is the unit rate, 'Anzahl' is the quantity/hours, and 'Summe' is the total.
+Return the result STRICTLY as a JSON array where each object has "name" (string), "rate" (string representing number mathematically using a dot for decimals like "130.50" rather than commas), and "hours" (string representing number). 
 Only return the valid JSON, no markdown formatting like \`\`\`json.
-Example: [{"name": "Konzeption und Planung", "rate": "3500", "hours": "1"}]`
+Example: [{"name": "Konzeption und Planung", "rate": "3500.00", "hours": "1"}]`
               }
             ]
           }
@@ -134,6 +127,7 @@ Example: [{"name": "Konzeption und Planung", "rate": "3500", "hours": "1"}]`
       const items = JSON.parse(jsonStr);
 
       res.json({ items, method: 'gemini_fallback' });
+
     } catch (error) {
       console.error('PDF Parse Error:', error);
       res.status(500).json({ error: 'Failed to parse PDF ' + (error as Error).message });
@@ -154,6 +148,12 @@ Example: [{"name": "Konzeption und Planung", "rate": "3500", "hours": "1"}]`
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
+
+  // Global error handler to catch multer and other middleware errors preventing HTML responses
+  app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    console.error('Express Global Error:', err);
+    res.status(500).json({ error: err.message || 'Internal Server Error' });
+  });
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on http://localhost:${PORT}`);
