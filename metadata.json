@@ -1,0 +1,6 @@
+{
+  "name": "Budget & Rate Calculator",
+  "description": "Calculate total budget and weighted average hourly rates from multiple project line items.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
